@@ -1,0 +1,182 @@
+name: CI/CD Pipeline - Flask + MongoDB to EC2
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  test:
+    name: Install & Test
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:6
+        ports:
+          - 27017:27017
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest -v
+
+  build-and-push:
+    name: Build & Push to ECR
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image_uri: ${{ steps.build-image.outputs.image_uri }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "image_uri=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy to EC2 & Verify
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_status: ${{ steps.verify.outputs.status }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR (for image URI)
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Deploy new container on EC2 over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: AWS_REGION,ECR_REPOSITORY,IMAGE_TAG
+          script: |
+            aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+            docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+            docker stop flask-app || true
+            docker rm flask-app || true
+            docker run -d --name flask-app \
+              --restart unless-stopped \
+              -p 5000:5000 \
+              -e MONGO_URI="${{ secrets.MONGO_URI }}" \
+              -e SECRET_KEY="${{ secrets.APP_SECRET_KEY }}" \
+              ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+
+      - name: Verify deployment via /health
+        id: verify
+        run: |
+          sleep 8
+          for i in 1 2 3 4 5; do
+            if curl -sf "http://${{ secrets.EC2_HOST }}:5000/health"; then
+              echo "status=success" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Health check attempt $i failed, retrying..."
+            sleep 5
+          done
+          echo "status=failed" >> "$GITHUB_OUTPUT"
+          exit 1
+
+  notify-success:
+    name: Notify Success
+    needs: [ test, build-and-push, deploy ]
+    if: success()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send success email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "✅ SUCCESS - CI/CD Pipeline Deployed - ${{ github.repository }}"
+          to: ${{ secrets.NOTIFY_EMAIL_TO }}
+          from: "CI/CD Pipeline <${{ secrets.SMTP_USERNAME }}>"
+          body: |
+            Deployment succeeded.
+
+            Commit SHA: ${{ github.sha }}
+            Branch: ${{ github.ref_name }}
+            Docker image tag: ${{ needs.build-and-push.outputs.image_uri }}
+            EC2 target: ${{ secrets.EC2_HOST }}
+            Health check: PASSED
+
+            Pipeline run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  notify-failure:
+    name: Notify Failure
+    needs: [ test, build-and-push, deploy ]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine failed stage
+        id: stage
+        run: |
+          if [ "${{ needs.test.result }}" == "failure" ]; then
+            echo "failed_stage=Test (pytest)" >> "$GITHUB_OUTPUT"
+          elif [ "${{ needs.build-and-push.result }}" == "failure" ]; then
+            echo "failed_stage=Build/Push to ECR" >> "$GITHUB_OUTPUT"
+          elif [ "${{ needs.deploy.result }}" == "failure" ]; then
+            echo "failed_stage=Deploy to EC2 / Health check" >> "$GITHUB_OUTPUT"
+          else
+            echo "failed_stage=Unknown" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Send failure email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "❌ FAILED - CI/CD Pipeline - ${{ github.repository }}"
+          to: ${{ secrets.NOTIFY_EMAIL_TO }}
+          from: "CI/CD Pipeline <${{ secrets.SMTP_USERNAME }}>"
+          body: |
+            Deployment failed.
+
+            Failed stage: ${{ steps.stage.outputs.failed_stage }}
+            Commit SHA: ${{ github.sha }}
+            Branch: ${{ github.ref_name }}
+
+            Investigate here: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
