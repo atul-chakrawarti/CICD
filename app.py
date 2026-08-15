@@ -13,9 +13,14 @@ app = Flask(__name__)
 app.config["MONGO_URI"] = os.getenv("MONGO_URI")
 app.secret_key = os.getenv("SECRET_KEY")
 
-# Use certifi CA bundle explicitly for cross-platform TLS reliability
-# (notably fixes common macOS certificate verification failures).
-mongo = PyMongo(app, tlsCAFile=certifi.where())
+# Use certifi CA bundle only for remote/Atlas connections (mongodb+srv://),
+# which require TLS. Local/CI MongoDB (mongodb://localhost:27017/...) does
+# NOT use TLS, so forcing tlsCAFile there breaks the connection.
+mongo_uri = app.config["MONGO_URI"] or ""
+if mongo_uri.startswith("mongodb+srv://"):
+    mongo = PyMongo(app, tlsCAFile=certifi.where())
+else:
+    mongo = PyMongo(app)
 
 # Health check - verifies the app is up AND can reach MongoDB.
 # Used by the CI/CD pipeline as the deploy-verification gate.
@@ -72,7 +77,6 @@ def update_student(student_id):
         return redirect(url_for('index'))
     return render_template('update_student.html', student=student)
 
-
 # Delete student
 @app.route('/delete/<student_id>')
 def delete_student(student_id):
@@ -81,5 +85,3 @@ def delete_student(student_id):
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", debug=True, port=5000)
-
-
