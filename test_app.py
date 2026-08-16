@@ -70,3 +70,13 @@ def test_delete_student(client):
     response = client.get(f'/delete/{student_id}', follow_redirects=True)
     assert response.status_code == 200
     assert b"Temp User" not in response.data
+
+
+def test_intentional_failure_demo():
+    """
+    INTENTIONAL FAILING TEST - for CI/CD assignment submission.
+    Demonstrates that the pipeline correctly stops at the Test stage
+    and does not proceed to Build/Push/Deploy when a test fails.
+    Remove this test after capturing the failure screenshot/email.
+    """
+    assert 1 == 2, "This test is intentionally designed to fail"
