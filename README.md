@@ -48,6 +48,17 @@ via `MONGO_URI` at runtime - it is never baked into the image.
 ### 3. SMTP for email notifications
 Any SMTP provider works (Gmail with an App Password, SendGrid, Mailgun, etc).
 
+### 4. Security group note on port 22
+
+Port 22 is open to `0.0.0.0/0` in this setup. This is a deliberate trade-off:
+GitHub-hosted Actions runners use dynamically-assigned IP addresses that
+change on every run, so restricting SSH to a fixed IP range would break the
+automated deploy step. The alternatives (a self-hosted runner with a static
+IP, or switching to AWS Systems Manager Session Manager instead of SSH) avoid
+this but add setup complexity beyond this assignment's scope. Given the SSH
+key is a dedicated deploy-only key with no other use, and the app itself has
+no sensitive local data, this trade-off was accepted for the assignment.
+
 ## Required GitHub Secrets
 
 Configure under **Repo Settings -> Secrets and variables -> Actions**:
