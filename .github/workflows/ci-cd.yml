@@ -140,7 +140,7 @@ jobs:
 
             Commit SHA: ${{ github.sha }}
             Branch: ${{ github.ref_name }}
-            Docker image tag: ${{ needs.build-and-push.outputs.image_uri }}
+            Docker image tag: ${{ secrets.ECR_REPOSITORY }}:${{ github.sha }}
             EC2 target: ${{ secrets.EC2_HOST }}
             Health check: PASSED
 
