@@ -1,4 +1,4 @@
-name: CI/CD Pipeline - Flask + MongoDB to EC2
+name: CI/CD Pipeline - Flask + MongoDB to EC2.
 
 on:
   push:
